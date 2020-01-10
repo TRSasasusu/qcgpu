@@ -1,11 +1,9 @@
 import os
 import random
 import numpy as np
-from pycuda import driver
+from pycuda import driver, gpuarray
 from pycuda.compiler import SourceModule
-import pyopencl as cl
-import pyopencl.array as pycl_array
-from pyopencl.reduction import ReductionKernel
+from pycuda.reduction import ReductionKernel
 from collections import defaultdict
 
 mod = SourceModule('''
@@ -169,9 +167,16 @@ __global__ void collapse(
 }
 ''')
 
-# Setup the OpenCL Context here to not prompt every execution
-context = None
-program = None
+# Setup the Cuda functions here to not prompt every execution
+class _Function:
+    def __init__(self):
+        self.apply_gate = mod.get_function('apply_gate')
+        self.apply_controlled_gate = mod.get_function('apply_controlled_gate')
+        self.apply_controlled_controlled_gate = mod.get_function('apply_controlled_controlled_gate')
+        self.get_single_amplitude = mod.get_function('get_single_amplitude')
+        self.calculate_probabilities = mod.get_function('calculate_probabilities')
+        self.collapse = mod.get_function('collapse')
+_function = None
 
 
 class CudaBackend:
@@ -186,7 +191,7 @@ class CudaBackend:
     # @profile
     def __init__(self, num_qubits, dtype=np.complex64):
         if not context:
-            create_context()
+            create_function()
         
         """
         Initialize a new Cuda Backend
@@ -197,59 +202,48 @@ class CudaBackend:
         self.num_qubits = num_qubits
         self.dtype = dtype
 
-        self.queue = cl.CommandQueue(context)
-
         # Buffer for the state vector
-        self.buffer = pycl_array.to_device(
-            self.queue,
-            np.eye(1, 2**num_qubits, dtype=dtype)
-        )
+        self.buffer = gpuarray.to_gpu(np.eye(1, 2**num_qubits, dtype=dtype)[0])
 
     def apply_gate(self, gate, target):
         """Applies a gate to the quantum register"""
-        program.apply_gate(
-            self.queue,
-            [int(2**self.num_qubits / 2)],
-            None,
-            self.buffer.data,
+        _function.apply_gate(
+            self.buffer.gpudata,
             np.int32(target),
             self.dtype(gate.a),
             self.dtype(gate.b),
             self.dtype(gate.c),
-            self.dtype(gate.d)
+            self.dtype(gate.d),
+            block=(2**self.num_qubits, 1, 1)
         )
 
     def apply_controlled_gate(self, gate, control, target):
         """Applies a controlled gate to the quantum register"""
 
-        program.apply_controlled_gate(
-            self.queue,
-            [int(2**self.num_qubits / 2)],
-            None,
-            self.buffer.data,
+        _function.apply_controlled_gate(
+            self.buffer.gpudata,
             np.int32(control),
             np.int32(target),
             self.dtype(gate.a),
             self.dtype(gate.b),
             self.dtype(gate.c),
-            self.dtype(gate.d)
+            self.dtype(gate.d),
+            block=(2**self.num_qubits, 1, 1)
         )
     
     def apply_controlled_controlled_gate(self, gate, control1, control2, target):
         """Applies a controlled controlled gate (such as a toffoli gate) to the quantum register"""
 
-        program.apply_controlled_controlled_gate(
-            self.queue,
-            [int(2**self.num_qubits / 2)],
-            None,
-            self.buffer.data,
+        _function.apply_controlled_controlled_gate(
+            self.buffer.gpudata,
             np.int32(control1),
             np.int32(control2),
             np.int32(target),
             self.dtype(gate.a),
             self.dtype(gate.b),
             self.dtype(gate.c),
-            self.dtype(gate.d)
+            self.dtype(gate.d),
+            block=(2**self.num_qubits, 1, 1)
         )
 
     def seed(self, val):
@@ -297,26 +291,25 @@ class CudaBackend:
         """Get the probability of a single qubit begin measured as '0'"""
 
         preamble = """
-        #include <pyopencl-complex.h>
+        #include <cuComplex.h>
 
-        float probability(int target, int i, cfloat_t amp) {
+        float probability(int target, int i, cuFloatComplex amp) {
             if ((i & (1 << target )) != 0) {
                 return 0;
             }
             // return 6.0;
-            float abs = cfloat_abs(amp);
+            float abs = cuCabs(amp);
             return abs * abs;
         }
         """
-        
+
 
         kernel = ReductionKernel(
-            context, 
             np.float, 
             neutral = "0",
             reduce_expr="a + b",
             map_expr="probability(target, i, amps[i])",
-            arguments="__global cfloat_t *amps, __global int target",
+            arguments="cuFloatComplex *amps, int target",
             preamble=preamble
         )
 
@@ -325,16 +318,13 @@ class CudaBackend:
     def reset(self, target):
         probability_of_0 = self.qubit_probability(target)
         norm = 1 / np.sqrt(probability_of_0)
-        
-        program.collapse(
-            self.queue,
-            [int(2**self.num_qubits)],
-            # 2**self.num_qubits,
-            None,
-            self.buffer.data,
+
+        _function.collapse(
+            self.buffer.gpudata,
             np.int32(target),
             np.int32(0),
-            np.float32(norm)
+            np.float32(norm),
+            block=(2**self.num_qubits, 1, 1)
         )
 
     def measure_collapse(self, target):
@@ -348,15 +338,12 @@ class CudaBackend:
             outcome = '1'
             norm = 1 / np.sqrt(1 - probability_of_0)
 
-        program.collapse(
-            self.queue,
-            [int(2**self.num_qubits)],
-            # 2**self.num_qubits,
-            None,
-            self.buffer.data,
+        _function.collapse(
+            self.buffer.gpudata,
             np.int32(target),
             np.int32(outcome),
-            np.float32(norm)
+            np.float32(norm),
+            block=(2**self.num_qubits, 1, 1)
         )
         return outcome
 
@@ -377,18 +364,13 @@ class CudaBackend:
 
     def single_amplitude(self, i):
         """Gets a single probability amplitude"""
-        out = pycl_array.to_device(
-            self.queue,
-            np.empty(1, dtype=np.complex64)
-        )
+        out = np.empty(1, dtype=np.complex64)
 
-        program.get_single_amplitude(
-            self.queue, 
-            (1, ), 
-            None, 
-            self.buffer.data,
-            out.data,
+        _function.get_single_amplitude(
+            self.buffer.gpudata,
+            driver.Out(out),
             np.int32(i)
+            block=(1, 0, 0)
         )
 
         return out[0]
@@ -399,26 +381,19 @@ class CudaBackend:
     
     def probabilities(self):
         """Gets the squared absolute value of each of the amplitudes"""
-        out = pycl_array.to_device(
-            self.queue,
-            np.zeros(2**self.num_qubits, dtype=np.float32)
+        out = np.zeros(2**self.num_qubits, dtype=np.float32)
+
+        _function.calculate_probabilities(
+            self.buffer.gpudata,
+            device.Out(out),
+            block=(2**self.num_qubits, 1, 1)
         )
 
-        program.calculate_probabilities(
-            self.queue,
-            out.shape,
-            None,
-            self.buffer.data,
-            out.data
-        )
-
-        return out.get()
+        return out
         
     def release(self):
-        self.buffer.base_data.release()
+        self.buffer.gpudata.free()
     
-def create_context():
-    global context
-    global program
-    context = cl.create_some_context()
-    program = cl.Program(context, kernel).build(options="-cl-no-signed-zeros -cl-mad-enable -cl-fast-relaxed-math")
+def create_function():
+    global _function
+    _function = _Function()

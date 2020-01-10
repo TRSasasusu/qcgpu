@@ -2,7 +2,6 @@
 Quantum Register Object
 """
 import qcgpu
-from qcgpu.opencl_backend import OpenCLBackend
 import numpy as np
 
 class State:
@@ -46,7 +45,7 @@ class State:
              [array(0.+0.j, dtype=complex64)]
              [array(0.+0.j, dtype=complex64)]]
     """
-    def __init__(self, num_qubits):
+    def __init__(self, num_qubits, use_cuda=False):
         
         if not isinstance(num_qubits, int):
             raise ValueError("num_qubits must be an int")
@@ -55,7 +54,12 @@ class State:
 
         #: The number of qubits that are in the register
         self.num_qubits = num_qubits
-        self.backend = OpenCLBackend(num_qubits)
+        if use_cuda:
+            from qcgpu.cuda_backend import CudaBackend
+            self.backend = CudaBackend(num_qubits)
+        else:
+            from qcgpu.opencl_backend import OpenCLBackend
+            self.backend = OpenCLBackend(num_qubits)
 
     def apply_gate(self, gate, target):
         """Applies a single qubit unitary gate to the register.
