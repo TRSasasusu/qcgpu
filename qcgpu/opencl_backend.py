@@ -217,7 +217,7 @@ context = None
 program = None
 
 
-class Backend:
+class OpenCLBackend:
     """
     A class for the OpenCL backend to the simulator.
 

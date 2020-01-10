@@ -2,8 +2,7 @@
 Quantum Register Object
 """
 import qcgpu
-from qcgpu.backend import Backend
-import pyopencl as cl
+from qcgpu.opencl_backend import OpenCLBackend
 import numpy as np
 
 class State:
@@ -56,7 +55,7 @@ class State:
 
         #: The number of qubits that are in the register
         self.num_qubits = num_qubits
-        self.backend = Backend(num_qubits)
+        self.backend = OpenCLBackend(num_qubits)
 
     def apply_gate(self, gate, target):
         """Applies a single qubit unitary gate to the register.
