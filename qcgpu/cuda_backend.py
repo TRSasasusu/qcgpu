@@ -1,19 +1,20 @@
 import os
 import random
 import numpy as np
+import pycuda.autoinit
 from pycuda import driver, gpuarray
 from pycuda.compiler import SourceModule
 from pycuda.reduction import ReductionKernel
 from collections import defaultdict
 
 mod = SourceModule('''
-#include <cuComplex.h>
+#include <pycuda-complex.hpp>
 
 /*
  * Returns the nth number where a given digit
  * is cleared in the binary representation of the number
  */
-static int nth_cleared(int n, int target)
+__device__ int nth_cleared(int n, int target)
 {
     int mask = (1 << target) - 1;
     int not_mask = ~mask;
@@ -33,12 +34,12 @@ static int nth_cleared(int n, int target)
  *  C D
  */
 __global__ void apply_gate(
-    cuFloatComplex *amplitudes,
+    pycuda::complex<float> *amplitudes,
     int target,
-    cuFloatComplex A,
-    cuFloatComplex B,
-    cuFloatComplex C,
-    cuFloatComplex D)
+    pycuda::complex<float> A,
+    pycuda::complex<float> B,
+    pycuda::complex<float> C,
+    pycuda::complex<float> D)
 {
     int const global_id = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -46,24 +47,24 @@ __global__ void apply_gate(
 
     int const one_state = zero_state | (1 << target);
 
-    cuFloatComplex const zero_amp = amplitudes[zero_state];
-    cuFloatComplex const one_amp = amplitudes[one_state];
+    pycuda::complex<float> const zero_amp = amplitudes[zero_state];
+    pycuda::complex<float> const one_amp = amplitudes[one_state];
 
-    amplitudes[zero_state] = cuCadd(cuCmul(A, zero_amp), cuCmul(B, one_amp));
-    amplitudes[one_state] = cuCadd(cuCmul(D, one_amp), cuCmul(C, zero_amp));
+    amplitudes[zero_state] = A * zero_amp + B * one_amp;
+    amplitudes[one_state] = D * one_amp + C * zero_amp;
 }
 
 /*
  * Applies a controlled single qubit gate to the register.
  */
 __global__ void apply_controlled_gate(
-    cuDoubleComplex *amplitudes,
+    pycuda::complex<float> *amplitudes,
     int control,
     int target,
-    cuFloatComplex A,
-    cuFloatComplex B,
-    cuFloatComplex C,
-    cuFloatComplex D)
+    pycuda::complex<float> A,
+    pycuda::complex<float> B,
+    pycuda::complex<float> C,
+    pycuda::complex<float> D)
 {
     int const global_id = blockDim.x * blockIdx.x + threadIdx.x;
     int const zero_state = nth_cleared(global_id, target);
@@ -72,17 +73,17 @@ __global__ void apply_controlled_gate(
     int const control_val_zero = (((1 << control) & zero_state) > 0) ? 1 : 0;
     int const control_val_one = (((1 << control) & one_state) > 0) ? 1 : 0;
 
-    cuFloatComplex const zero_amp = amplitudes[zero_state];
-    cuFloatComplex const one_amp = amplitudes[one_state];
+    pycuda::complex<float> const zero_amp = amplitudes[zero_state];
+    pycuda::complex<float> const one_amp = amplitudes[one_state];
 
     if (control_val_zero == 1)
     {
-        amplitudes[zero_state] = cuCadd(cuCmul(A, zero_amp), cuCmul(B, one_amp));
+        amplitudes[zero_state] = A * zero_amp + B * one_amp;
     }
 
     if (control_val_one == 1)
     {
-        amplitudes[one_state] = cuCadd(cuCmul(D, one_amp), cuCmul(C, zero_amp));
+        amplitudes[one_state] = D * one_amp + C * zero_amp;
     }
 }
 
@@ -90,14 +91,14 @@ __global__ void apply_controlled_gate(
  * Applies a controlled-controlled single qubit gate to the register.
  */
 __global__ void apply_controlled_controlled_gate(
-    cuFloatComplex *amplitudes,
+    pycuda::complex<float> *amplitudes,
     int control,
     int control_2,
     int target,
-    cuFloatComplex A,
-    cuFloatComplex B,
-    cuFloatComplex C,
-    cuFloatComplex D)
+    pycuda::complex<float> A,
+    pycuda::complex<float> B,
+    pycuda::complex<float> C,
+    pycuda::complex<float> D)
 {
     int const global_id = blockDim.x * blockIdx.x + threadIdx.x;
     int const zero_state = nth_cleared(global_id, target);
@@ -108,17 +109,17 @@ __global__ void apply_controlled_controlled_gate(
     int const control_val_two_zero = (((1 << control_2) & zero_state) > 0) ? 1 : 0;
     int const control_val_two_one = (((1 << control_2) & one_state) > 0) ? 1 : 0;
 
-    cuFloatComplex const zero_amp = amplitudes[zero_state];
-    cuFloatComplex const one_amp = amplitudes[one_state];
+    pycuda::complex<float> const zero_amp = amplitudes[zero_state];
+    pycuda::complex<float> const one_amp = amplitudes[one_state];
 
     if (control_val_zero == 1 && control_val_two_zero == 1)
     {
-        amplitudes[zero_state] = cuCadd(cuCmul(A, zero_amp), cuCmul(B, one_amp));
+        amplitudes[zero_state] = A * zero_amp + B * one_amp;
     }
 
     if (control_val_one == 1 && control_val_two_one == 1)
     {
-        amplitudes[one_state] = cuCadd(cuCmul(D, one_amp), cuCmul(C, zero_amp));
+        amplitudes[one_state] = D * one_amp + C * zero_amp;
     }
 }
 
@@ -126,8 +127,8 @@ __global__ void apply_controlled_controlled_gate(
  * Get a single amplitude
  */
 __global__ void get_single_amplitude(
-    cuFloatComplex *const amplitudes,
-    cuFloatComplex *out,
+    pycuda::complex<float> *const amplitudes,
+    pycuda::complex<float> *out,
     int i)
 {
     out[0] = amplitudes[i];
@@ -137,20 +138,20 @@ __global__ void get_single_amplitude(
  * Calculates The Probabilities Of A State Vector
  */
 __global__ void calculate_probabilities(
-    cuFloatComplex *const amplitudes,
+    pycuda::complex<float> *const amplitudes,
     float *probabilities)
 {
     int const state = blockDim.x * blockIdx.x + threadIdx.x;
-    cuFloatComplex amp = amplitudes[state];
+    pycuda::complex<float> amp = amplitudes[state];
 
-    probabilities[state] = cuCabs(cuCmul(amp, amp));
+    probabilities[state] = pycuda::abs(amp * amp);
 }
 
 /**
  * Collapses a qubit in the register
  */
 __global__ void collapse(
-    cuFloatComplex *amplitudes,
+    pycuda::complex<float> *amplitudes,
     int const target,
     int const outcome, 
     float const norm)
@@ -158,11 +159,11 @@ __global__ void collapse(
     int const state = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (((state >> target) & 1) == outcome) {
-        amplitudes[state] = cuCmul(amplitudes[state], make_cuFloatComplex(norm, 0.0));
+        amplitudes[state] = amplitudes[state] * pycuda::complex<float>(norm, 0.0);
     }
     else
     {
-        amplitudes[state] = make_cuFloatComplex(0.0, 0.0);
+        amplitudes[state] = pycuda::complex<float>(0.0, 0.0);
     }
 }
 ''')
@@ -190,7 +191,7 @@ class CudaBackend:
 
     # @profile
     def __init__(self, num_qubits, dtype=np.complex64):
-        if not context:
+        if not _function:
             create_function()
         
         """
@@ -214,7 +215,7 @@ class CudaBackend:
             self.dtype(gate.b),
             self.dtype(gate.c),
             self.dtype(gate.d),
-            block=(2**self.num_qubits, 1, 1)
+            block=(2**self.num_qubits // 2, 1, 1)
         )
 
     def apply_controlled_gate(self, gate, control, target):
@@ -228,7 +229,7 @@ class CudaBackend:
             self.dtype(gate.b),
             self.dtype(gate.c),
             self.dtype(gate.d),
-            block=(2**self.num_qubits, 1, 1)
+            block=(2**self.num_qubits // 2, 1, 1)
         )
     
     def apply_controlled_controlled_gate(self, gate, control1, control2, target):
@@ -243,7 +244,7 @@ class CudaBackend:
             self.dtype(gate.b),
             self.dtype(gate.c),
             self.dtype(gate.d),
-            block=(2**self.num_qubits, 1, 1)
+            block=(2**self.num_qubits // 2, 1, 1)
         )
 
     def seed(self, val):
@@ -291,14 +292,14 @@ class CudaBackend:
         """Get the probability of a single qubit begin measured as '0'"""
 
         preamble = """
-        #include <cuComplex.h>
+        #include <pycuda-complex.hpp>
 
-        float probability(int target, int i, cuFloatComplex amp) {
+        float probability(int target, int i, pycuda::complex<float> amp) {
             if ((i & (1 << target )) != 0) {
                 return 0;
             }
             // return 6.0;
-            float abs = cuCabs(amp);
+            float abs = pycuda::abs(amp);
             return abs * abs;
         }
         """
@@ -309,7 +310,7 @@ class CudaBackend:
             neutral = "0",
             reduce_expr="a + b",
             map_expr="probability(target, i, amps[i])",
-            arguments="cuFloatComplex *amps, int target",
+            arguments="pycuda::complex<float> *amps, int target",
             preamble=preamble
         )
 
@@ -369,7 +370,7 @@ class CudaBackend:
         _function.get_single_amplitude(
             self.buffer.gpudata,
             driver.Out(out),
-            np.int32(i)
+            np.int32(i),
             block=(1, 0, 0)
         )
 
