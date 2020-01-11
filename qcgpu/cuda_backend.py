@@ -206,8 +206,17 @@ class CudaBackend:
         # Buffer for the state vector
         self.buffer = gpuarray.to_gpu(np.eye(1, 2**num_qubits, dtype=dtype))
 
+    def calc_block_grid_size(self):
+        max_threads_per_block = driver.Device(0).max_threads_per_block
+        whole_size = 2 ** self.num_qubits
+        if whole_size < max_threads_per_block:
+            return (whole_size, 1, 1), (1, 1)
+        else:
+            return (max_threads_per_block, 1, 1), (whole_size // max_threads_per_block, 1)
+
     def apply_gate(self, gate, target):
         """Applies a gate to the quantum register"""
+        block, grid = self.calc_block_grid_size()
         _function.apply_gate(
             self.buffer.gpudata,
             np.int32(target),
@@ -215,12 +224,14 @@ class CudaBackend:
             self.dtype(gate.b),
             self.dtype(gate.c),
             self.dtype(gate.d),
-            block=(2**self.num_qubits // 2, 1, 1)
+            block=(block[0] // 2, 1, 1),
+            grid=grid
         )
 
     def apply_controlled_gate(self, gate, control, target):
         """Applies a controlled gate to the quantum register"""
 
+        block, grid = self.calc_block_grid_size()
         _function.apply_controlled_gate(
             self.buffer.gpudata,
             np.int32(control),
@@ -229,12 +240,14 @@ class CudaBackend:
             self.dtype(gate.b),
             self.dtype(gate.c),
             self.dtype(gate.d),
-            block=(2**self.num_qubits // 2, 1, 1)
+            block=(block[0] // 2, 1, 1),
+            grid=grid
         )
     
     def apply_controlled_controlled_gate(self, gate, control1, control2, target):
         """Applies a controlled controlled gate (such as a toffoli gate) to the quantum register"""
 
+        block, grid = self.calc_block_grid_size()
         _function.apply_controlled_controlled_gate(
             self.buffer.gpudata,
             np.int32(control1),
@@ -244,7 +257,8 @@ class CudaBackend:
             self.dtype(gate.b),
             self.dtype(gate.c),
             self.dtype(gate.d),
-            block=(2**self.num_qubits // 2, 1, 1)
+            block=(block[0] // 2, 1, 1),
+            grid=grid
         )
 
     def seed(self, val):
@@ -320,12 +334,14 @@ class CudaBackend:
         probability_of_0 = self.qubit_probability(target)
         norm = 1 / np.sqrt(probability_of_0)
 
+        block, grid = self.calc_block_grid_size()
         _function.collapse(
             self.buffer.gpudata,
             np.int32(target),
             np.int32(0),
             np.float32(norm),
-            block=(2**self.num_qubits, 1, 1)
+            block=block,
+            grid=grid
         )
 
     def measure_collapse(self, target):
@@ -339,12 +355,14 @@ class CudaBackend:
             outcome = '1'
             norm = 1 / np.sqrt(1 - probability_of_0)
 
+        block, grid = self.calc_block_grid_size()
         _function.collapse(
             self.buffer.gpudata,
             np.int32(target),
             np.int32(outcome),
             np.float32(norm),
-            block=(2**self.num_qubits, 1, 1)
+            block=block,
+            grid=grid
         )
         return outcome
 
@@ -384,10 +402,12 @@ class CudaBackend:
         """Gets the squared absolute value of each of the amplitudes"""
         out = np.zeros(2**self.num_qubits, dtype=np.float32)
 
+        block, grid = self.calc_block_grid_size()
         _function.calculate_probabilities(
             self.buffer.gpudata,
-            device.Out(out),
-            block=(2**self.num_qubits, 1, 1)
+            driver.Out(out),
+            block=block,
+            grid=grid
         )
 
         return out
