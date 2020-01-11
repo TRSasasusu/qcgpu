@@ -204,7 +204,7 @@ class CudaBackend:
         self.dtype = dtype
 
         # Buffer for the state vector
-        self.buffer = gpuarray.to_gpu(np.eye(1, 2**num_qubits, dtype=dtype)[0])
+        self.buffer = gpuarray.to_gpu(np.eye(1, 2**num_qubits, dtype=dtype))
 
     def apply_gate(self, gate, target):
         """Applies a gate to the quantum register"""
