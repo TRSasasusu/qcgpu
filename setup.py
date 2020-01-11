@@ -19,6 +19,6 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     setup_requires=['pytest-runner'],
-    install_requires=['mako', 'pyopencl', 'pybind11', 'numpy'],
+    install_requires=['mako', 'pybind11', 'numpy'],
     tests_require=["pytest"]
 )

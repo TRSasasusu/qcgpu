@@ -45,7 +45,7 @@ class State:
              [array(0.+0.j, dtype=complex64)]
              [array(0.+0.j, dtype=complex64)]]
     """
-    def __init__(self, num_qubits, use_cuda=False):
+    def __init__(self, num_qubits, use_cuda=True):
         
         if not isinstance(num_qubits, int):
             raise ValueError("num_qubits must be an int")
